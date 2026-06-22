@@ -1,0 +1,30 @@
+# Environment
+.env
+
+# Dataset (terlalu besar untuk di-commit)
+data/raw/
+
+# Hasil run eksperimen (auto-generated)
+results/runs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# OS
+.DS_Store
+Thumbs.db

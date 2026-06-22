@@ -1,0 +1,5 @@
+anthropic
+pandas
+scikit-learn
+python-dotenv
+rich
