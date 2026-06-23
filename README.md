@@ -2,7 +2,7 @@
 
 Eksperimen untuk mengukur trade-off antara **token compression** dan **detection quality** pada pipeline AI-integrated Security Operations Center (SOC).
 
-Pipeline ini mensimulasikan alur SOC alert: log dari dataset BETH (real Kubernetes honeypot) dikompresi dengan berbagai strategi sebelum dikirim ke LLM, lalu kualitas deteksinya diukur menggunakan precision, recall, dan F1.
+Pipeline ini mensimulasikan alur SOC alert: log dari dataset BETH (real Kubernetes honeypot) dikompresi dengan berbagai strategi sebelum dikirim ke LLM, lalu kualitas deteksinya diukur menggunakan precision, recall, dan F1 — dibandingkan terhadap baseline heuristic dan Isolation Forest tanpa LLM.
 
 ---
 
@@ -10,21 +10,32 @@ Pipeline ini mensimulasikan alur SOC alert: log dari dataset BETH (real Kubernet
 
 Salah satu barrier terbesar dalam SOC automation berbasis LLM adalah **volume log yang sangat besar**. Sebuah Kubernetes cluster produksi bisa menghasilkan ratusan ribu events per jam — mengirim semuanya ke LLM bukan hanya mahal, tapi seringkali melampaui context window model.
 
-Project ini mengeksplorasi pertanyaan: **seberapa banyak log bisa dikompresi sebelum LLM kehilangan kemampuan mendeteksi ancaman?**
+Project ini mengeksplorasi pertanyaan: **seberapa banyak log bisa dikompresi sebelum LLM kehilangan kemampuan mendeteksi ancaman? Dan apakah LLM benar-benar memberikan nilai tambah di atas rule-based detection?**
 
 ---
 
 ## Demo
 
 ```
-baseline         1000 logs  →  4781 tokens  |  F1: 0.667  Recall: 1.0
-dedup              48 logs  →  1373 tokens  |  F1: 0.364  Recall: 0.667   (-71.3% token)
-near_dedup         53 logs  →  1484 tokens  |  F1: 0.364  Recall: 0.667   (-69.0% token)
-incident_cluster   65 logs  →  1791 tokens  |  F1: 0.500  Recall: 1.0     (-62.5% token)
-trend_detection    74 logs  →  1967 tokens  |  F1: 0.182  Recall: 0.333   (-58.8% token)
-whitelist         695 logs  →  4839 tokens  |  F1: 0.667  Recall: 1.0     (-1.3%  token)
-severity_filter   461 logs  →  4897 tokens  |  F1: 0.000  Recall: 0.0     (-2.4%  token)
+# Baseline (tanpa compression)
+baseline              1000 logs  →  4785 tokens  |  F1: 0.667  Recall: 1.0    (0%)
+
+# Strategi tunggal
+dedup                   48 logs  →  1372 tokens  |  F1: 0.364  Recall: 0.667  (-71.3%)
+incident_cluster        65 logs  →  1798 tokens  |  F1: 0.500  Recall: 1.0    (-62.4%)
+trend_detection         74 logs  →  1971 tokens  |  F1: 0.167  Recall: 0.333  (-58.8%)
+
+# Pipeline kombinasi
+pipeline_a (wl+cluster) 50 logs  →  1456 tokens  |  F1: 0.500  Recall: 1.0    (-69.6%) ← sweet spot
+pipeline_b (wl+cl+dedup)14 logs  →   596 tokens  |  F1: 0.250  Recall: 0.333  (-87.5%)
+pipeline_c (wl+tr+cl)   37 logs  →  1132 tokens  |  F1: 0.200  Recall: 0.333  (-76.3%)
+
+# Baseline tanpa LLM
+rule_sus                 —  logs  →     0 tokens  |  F1: 0.500  Recall: 1.0    (-100%)
+isolation_forest         —  logs  →     0 tokens  |  F1: 0.316  Recall: 1.0    (-100%)  ROC-AUC: 1.0*
 ```
+
+*ROC-AUC 1.0 kemungkinan overfit di subset kecil — paper asli dapat 0.850 di full dataset.
 
 ---
 
@@ -39,11 +50,13 @@ soc-token-efficiency/
 │   ├── compressor.py             # 7 strategi compression + 3 pipeline kombinasi
 │   ├── prompt.py                 # Prompt builder untuk LLM
 │   ├── llm.py                    # Wrapper Groq API
-│   └── evaluator.py              # Hitung token savings, precision, recall, F1
+│   ├── evaluator.py              # Hitung token savings, precision, recall, F1
+│   └── detector.py               # Rule-based + Isolation Forest baseline (tanpa LLM)
 ├── results/
 │   └── runs/                     # Output JSON per eksperimen (auto-generated)
-├── main.py                       # Entry point eksperimen
-├── analyze_recall.py             # Deep-dive analisis per strategi
+├── main.py                       # Eksperimen penuh: semua strategi + baseline
+├── run_pipeline.py               # Eksperimen khusus pipeline kombinasi
+├── analyze_recall.py             # Deep-dive analisis recall per strategi
 ├── visualize_results.py          # Generate dashboard HTML dari hasil run
 ├── FINDINGS.md                   # Dokumentasi temuan eksperimen
 ├── requirements.txt
@@ -54,18 +67,30 @@ soc-token-efficiency/
 
 ## Strategi Compression
 
-| Strategi | Cara kerja | Token savings |
-|---|---|---|
-| `baseline` | Semua log dikirim tanpa filter | 0% |
-| `dedup` | Hapus duplikat berdasarkan `(eventId, userId)` | ~71% |
-| `near_dedup` | Hapus duplikat berdasarkan `(eventId, userId, returnValue bucket)` | ~69% |
-| `severity_filter` | Hanya kirim log dengan `sus=1` | ~0% (dataset-dependent) |
-| `trend_detection` | Burst events (>10x) diganti satu baris summary count | ~59% |
-| `incident_cluster` | Grouping per PID, hanya PID anomalous yang dikirim | ~63% |
-| `whitelist` | Buang syscall known-benign kecuali yang flagged | ~0% (dataset-dependent) |
-| `pipeline_a` | whitelist → incident_cluster | TBD |
-| `pipeline_b` | whitelist → incident_cluster → dedup | TBD |
-| `pipeline_c` | whitelist → trend_detection → incident_cluster | TBD |
+| Strategi | Cara kerja | Savings | Recall |
+|---|---|---|---|
+| `baseline` | Semua log dikirim tanpa filter | 0% | 1.0 |
+| `dedup` | Hapus duplikat `(eventId, userId)` | ~71% | 0.667 |
+| `near_dedup` | Hapus duplikat `(eventId, userId, ret_bucket)` | ~69% | 0.667 |
+| `severity_filter` | Hanya kirim log `sus=1` | ~0%* | 0.0* |
+| `trend_detection` | Burst events >10x diganti summary count | ~59% | 0.333 |
+| `incident_cluster` | Grouping per PID, hanya PID anomalous | ~62% | 1.0 |
+| `whitelist` | Buang syscall known-benign kecuali yang flagged | ~0%* | 1.0 |
+| `pipeline_a` | whitelist → incident_cluster | ~70% | 1.0 |
+| `pipeline_b` | whitelist → incident_cluster → dedup | ~88% | 0.333 |
+| `pipeline_c` | whitelist → trend_detection → incident_cluster | ~76% | 0.333 |
+
+*dataset-dependent
+
+## Baseline Tanpa LLM
+
+| Detector | Cara kerja | Tokens | Recall | F1 |
+|---|---|---|---|---|
+| `rule_sus` | Flag PID yang punya sus=1 | 0 | 1.0 | 0.500 |
+| `rule_eventid` | Flag PID yang eksekusi syscall high-risk | 0 | 0.0 | 0.000 |
+| `rule_burst` | Flag PID dengan aktivitas burst | 0 | 0.0 | 0.000 |
+| `rule_all` | Union semua rule | 0 | 1.0 | 0.333 |
+| `isolation_forest` | Anomaly detection (Highnam et al. 2021) | 0 | 1.0 | 0.316 |
 
 ---
 
@@ -74,7 +99,7 @@ soc-token-efficiency/
 ### 1. Clone & install
 
 ```bash
-git clone https://github.com/username/soc-token-efficiency.git
+git clone https://github.com/Kell1179/soc-token-efficiency.git
 cd soc-token-efficiency
 
 python -m venv venv
@@ -100,24 +125,34 @@ Download **BETH dataset** dari [Kaggle](https://www.kaggle.com/datasets/katehigh
 ### 4. Jalankan eksperimen
 
 ```bash
-# Default: 1000 baris, max 200 log per strategi
+# Eksperimen penuh: semua strategi + rule-based baseline
 python main.py --data data/raw/labelled_testing_data.csv
 
-# Custom
+# Hanya pipeline kombinasi (hemat token API)
+python run_pipeline.py --data data/raw/labelled_testing_data.csv
+
+# Custom rows dan max logs
 python main.py --data data/raw/labelled_testing_data.csv --rows 2000 --max-logs 150
 
-# Skip N baris pertama (untuk eksplor bagian dataset yang berbeda)
+# Skip N baris untuk eksplor window dataset yang berbeda
 python main.py --data data/raw/labelled_testing_data.csv --skip 5000 --rows 1000
 ```
 
-### 5. Visualisasi hasil
+### 5. Rule-based baseline saja (tanpa API)
+
+```bash
+# Tidak butuh GROQ_API_KEY
+python src/detector.py
+```
+
+### 6. Visualisasi hasil
 
 ```bash
 python visualize_results.py
 # Buka results/summary.html di browser
 ```
 
-### 6. Analisis mendalam
+### 7. Analisis mendalam
 
 ```bash
 python analyze_recall.py
@@ -127,15 +162,15 @@ python analyze_recall.py
 
 ## Key Findings
 
-**LLM menambah nilai nyata di atas rule-based dan ML baseline** — `rule_sus` dan Isolation Forest keduanya dapat recall 1.0 dengan 0 token, tapi F1 mereka 0.500 dan 0.316. LLM baseline mencapai F1 0.667 (+0.167 di atas rule terbaik) karena lebih akurat dalam mengidentifikasi PID mana yang benar-benar malicious.
+**`pipeline_a` adalah rekomendasi arsitektur terbaik** — whitelist → incident_cluster menghemat 69.6% token dengan recall tetap 1.0. Tidak ada evil PID yang terlewat, dengan biaya F1 turun dari 0.667 ke 0.500 dibanding baseline.
 
-**`incident_cluster` adalah sweet spot** — satu-satunya strategi yang mempertahankan recall 1.0 sekaligus hemat 62.5% token. F1-nya (0.500) setara dengan rule_sus, artinya LLM dengan compression yang tepat bisa dapat performa rule-based dengan biaya token jauh lebih rendah dari baseline.
+**LLM menambah nilai nyata di atas rule-based** — `rule_sus` dan Isolation Forest dapat recall 1.0 dengan 0 token, tapi F1-nya hanya 0.500 dan 0.316. LLM baseline mencapai F1 0.667 (+0.167) karena lebih akurat membedakan PID yang benar-benar malicious dari yang sekadar suspicious.
 
-**Exact deduplication rentan collision** — `dedup` dan `near_dedup` keduanya miss 1 dari 3 evil PID karena key kolom dari evil PID tersebut sudah diklaim PID lain. Ini limitasi fundamental, bukan bug implementasi.
+**Ada titik kritis saat menambah dedup ke pipeline** — `pipeline_b` menambahkan dedup setelah cluster dan savings melonjak ke 87.5%, tapi recall drop dari 1.0 ke 0.333. Satu tahap compression tambahan bisa mengubah pipeline dari recall-safe menjadi recall-unsafe.
 
-**`trend_detection` paradox** — summarizing burst events justru merusak konteks yang dibutuhkan LLM. Summary `evt=59 count=50` menghilangkan informasi PID spesifik, sehingga LLM tidak bisa mengidentifikasi malicious process.
+**Exact deduplication rentan collision** — `dedup` dan `near_dedup` miss 1 dari 3 evil PID karena key kolom dari evil PID tersebut sudah diklaim PID lain. Limitasi fundamental, bukan bug.
 
-**Isolation Forest ROC-AUC 1.0 perlu dikritisi** — hasil ini kemungkinan overfit di subset 1000 baris dengan hanya 15 evil events. Paper Highnam et al. (2021) dengan full dataset mendapat 0.850 — angka yang lebih representatif.
+**`trend_detection` paradox** — summarizing burst events menghapus konteks PID spesifik yang dibutuhkan LLM. F1 terendah (0.167) meski hemat 58.8% token.
 
 Lihat [FINDINGS.md](./FINDINGS.md) untuk analisis lengkap beserta referensi.
 
@@ -149,6 +184,8 @@ Lihat [FINDINGS.md](./FINDINGS.md) untuk analisis lengkap beserta referensi.
 - **Language**: Python 3.10+
 - **Libraries**: `pandas`, `groq`, `scikit-learn`, `rich`, `python-dotenv`
 
+---
+
 ## Referensi
 
 1. Highnam et al. (2021) — *BETH Dataset: Real Cybersecurity Data for Unsupervised Anomaly Detection Research.* CEUR-WS Vol-3095. https://ceur-ws.org/Vol-3095/paper1.pdf
@@ -160,10 +197,11 @@ Lihat [FINDINGS.md](./FINDINGS.md) untuk analisis lengkap beserta referensi.
 
 ## Keterbatasan
 
-- Eksperimen dilakukan pada subset kecil dataset (1000 baris) karena keterbatasan rate limit API gratis
-- Ground truth (`evil` label) di BETH sangat "bersih" — di dunia nyata evil events bisa bercampur dengan benign events dalam satu PID
-- Whitelist eventId dikalibrasi manual berdasarkan pengetahuan Linux syscall, bukan data-driven
+- Eksperimen dilakukan pada subset kecil (1000 baris dari 188k) karena rate limit API gratis
+- Evil PID di BETH sangat "bersih" — semua event evil berlabel sus=1, tidak realistis untuk SOC produksi
+- Whitelist eventId dikalibrasi manual, tidak data-driven
 - Evaluasi hanya pada satu model (llama-3.3-70b) — hasil bisa berbeda di model lain
+- ROC-AUC hanya tersedia untuk Isolation Forest, tidak untuk LLM
 
 ---
 
