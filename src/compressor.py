@@ -270,3 +270,73 @@ if __name__ == "__main__":
 
     console.print("\n[yellow]Hasil compression (dari 1000 logs):[/yellow]")
     run_all_strategies(logs)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline kombinasi — jalankan strategi secara berurutan
+# ---------------------------------------------------------------------------
+
+def compress_pipeline_a(logs: list[dict]) -> list[dict]:
+    """
+    Pipeline A: whitelist → incident_cluster
+    Buang benign syscall dulu, lalu filter per PID anomalous.
+    Ekspektasi: savings lebih tinggi dari cluster saja.
+    """
+    step1 = compress_whitelist(logs)
+    step2 = compress_incident_cluster(step1)
+    return step2
+
+
+def compress_pipeline_b(logs: list[dict]) -> list[dict]:
+    """
+    Pipeline B: whitelist → incident_cluster → dedup
+    Tambah exact dedup di akhir untuk buang sisa duplikat.
+    """
+    step1 = compress_whitelist(logs)
+    step2 = compress_incident_cluster(step1)
+    step3 = compress_dedup(step2)
+    return step3
+
+
+def compress_pipeline_c(logs: list[dict]) -> list[dict]:
+    """
+    Pipeline C: whitelist → trend_detection → incident_cluster
+    Burst events diringkas dulu, baru cluster per PID.
+    """
+    step1 = compress_whitelist(logs)
+    step2 = compress_trend_detection(step1)
+    step3 = compress_incident_cluster(step2)
+    return step3
+
+
+PIPELINE_STRATEGIES = {
+    "pipeline_a_wl+cluster"      : compress_pipeline_a,
+    "pipeline_b_wl+cluster+dedup": compress_pipeline_b,
+    "pipeline_c_wl+trend+cluster": compress_pipeline_c,
+}
+
+STRATEGIES.update(PIPELINE_STRATEGIES)
+
+
+def compress_pipeline_a(logs: list[dict]) -> list[dict]:
+    """Pipeline A: whitelist → incident_cluster"""
+    return compress_incident_cluster(compress_whitelist(logs))
+
+
+def compress_pipeline_b(logs: list[dict]) -> list[dict]:
+    """Pipeline B: whitelist → incident_cluster → dedup"""
+    return compress_dedup(compress_incident_cluster(compress_whitelist(logs)))
+
+
+def compress_pipeline_c(logs: list[dict]) -> list[dict]:
+    """Pipeline C: whitelist → trend_detection → incident_cluster"""
+    return compress_incident_cluster(compress_trend_detection(compress_whitelist(logs)))
+
+
+PIPELINE_STRATEGIES = {
+    "pipeline_a_wl+cluster"      : compress_pipeline_a,
+    "pipeline_b_wl+cluster+dedup": compress_pipeline_b,
+    "pipeline_c_wl+trend+cluster": compress_pipeline_c,
+}
+
+STRATEGIES.update(PIPELINE_STRATEGIES)
