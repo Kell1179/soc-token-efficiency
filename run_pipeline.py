@@ -40,6 +40,7 @@ TARGETS = {
 def parse_args():
     parser = argparse.ArgumentParser(description="Run pipeline combination strategies only")
     parser.add_argument("--rows",     type=int, default=1000)
+    parser.add_argument("--skip",     type=int, default=0)
     parser.add_argument("--max-logs", type=int, default=200)
     parser.add_argument("--data",     type=str,
                         default="data/raw/labelled_testing_data.csv")
@@ -51,14 +52,14 @@ def main():
 
     console.rule("[bold cyan]Pipeline Combination Experiment[/bold cyan]")
     console.print(f"Dataset  : {args.data}")
-    console.print(f"Rows     : {args.rows}")
+    console.print(f"Rows     : {args.rows} (skip={args.skip})")
     console.print(f"Max logs : {args.max_logs} per strategi")
     console.print(f"Strategies: {list(TARGETS.keys())}")
     console.print()
 
     # Load
     console.rule("Step 1 — Load dataset")
-    df   = load_beth(args.data, max_rows=args.rows)
+    df   = load_beth(args.data, max_rows=args.rows, skip_rows=args.skip)
     logs = to_log_dicts(df)
 
     # Compress

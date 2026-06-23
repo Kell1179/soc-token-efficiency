@@ -32,13 +32,31 @@
 | `whitelist` | LLM | 4,839 | -1.1% | 1.0 | 0.667 |
 | `severity_filter` | LLM | 4,897 | -2.3% | 0.0 | 0.000 |
 
-### LLM — pipeline kombinasi
+### LLM — pipeline kombinasi (skip=0)
 
 | Strategy | Type | Tokens | Savings | Recall | F1 |
 |---|---|---|---|---|---|
 | `pipeline_a` (wl→cluster) | LLM pipeline | 1,456 | 69.6% | **1.0** | 0.500 |
 | `pipeline_b` (wl→cluster→dedup) | LLM pipeline | 596 | **87.5%** | 0.333 | 0.250 |
 | `pipeline_c` (wl→trend→cluster) | LLM pipeline | 1,132 | 76.3% | 0.333 | 0.200 |
+
+### Cross-window validation pipeline (3 window × 4 strategi)
+
+| Window | Strategy | Tokens | Savings | Recall | F1 |
+|---|---|---|---|---|---|
+| skip=5000 | baseline | 4,902 | 0% | 1.0 | 0.667 |
+| skip=5000 |  | 830 | 83.1% | **1.0** | 0.500 |
+| skip=5000 |  | 510 | 89.6% | **1.0** | 0.500 |
+| skip=5000 |  | 540 | 89.0% | **1.0** | 0.500 |
+| skip=10000 | baseline | 4,898 | 0% | 1.0 | 0.667 |
+| skip=10000 |  | 486 | **90.1%** | **1.0** | **0.667** |
+| skip=10000 |  | 369 | **92.5%** | **1.0** | **0.667** |
+| skip=10000 |  | 492 | **90.0%** | **1.0** | **0.667** |
+| skip=20000 | baseline | 4,904 | 0% | 0.0 | 0.000 |
+| skip=20000 |  | 607 | 87.6% | 0.0 | 0.000 |
+| skip=20000 | *(semua)* | — | — | 0.0 | 0.000 |
+
+*skip=20000: tidak ada evil events di window ini — F1=0 bukan kegagalan pipeline
 
 *ROC-AUC 1.0 kemungkinan overfit di subset 1000 baris — paper asli dengan full dataset dapat 0.850.
 
@@ -55,26 +73,41 @@ yang benar-benar malicious, bukan sekadar mencurigai semua PID yang punya sus=1.
 
 **LLM menambah F1 +0.167 di atas rule_sus terbaik, dengan biaya 4,785 token.**
 
-### 2. `pipeline_a` adalah rekomendasi arsitektur terbaik
+### 2. `pipeline_a` adalah rekomendasi arsitektur terbaik — divalidasi di 3 window
 
-`pipeline_a` (whitelist → incident_cluster) adalah sweet spot dari seluruh eksperimen:
-- Token savings **69.6%** dari baseline
-- Recall **1.0** — tidak ada evil PID yang terlewat
-- F1 0.500 — turun 0.167 dari baseline tapi setara dengan rule_sus
+`pipeline_a` (whitelist → incident_cluster) adalah sweet spot dari seluruh eksperimen,
+dan konsisten di tiga window dataset yang berbeda:
+
+| Window | Tokens | Savings | Recall | F1 |
+|---|---|---|---|---|
+| skip=0 | 1,456 | 69.6% | **1.0** | 0.500 |
+| skip=5000 | 830 | 83.1% | **1.0** | 0.500 |
+| skip=10000 | 486 | **90.1%** | **1.0** | **0.667** |
+
+Recall 1.0 konsisten di semua window yang mengandung evil events.
+Token savings bahkan meningkat di window yang lebih dalam (69.6% → 90.1%),
+karena distribusi syscall benign lebih dominan di bagian dataset tersebut.
 
 Dibanding `incident_cluster` saja (62.4% savings), whitelist di tahap pertama
-menambah 7.2% savings tambahan tanpa mengorbankan recall. Ini menunjukkan
-bahwa pipeline berlapis lebih efektif dari strategi tunggal.
+menambah savings signifikan tanpa mengorbankan recall.
 
-### 3. Ada titik kritis saat menambah dedup ke pipeline
+### 3. `pipeline_b` tidak konsisten antar window — collision problem bersifat window-dependent
 
-`pipeline_b` menambahkan dedup setelah cluster dan mendapat savings 87.5%,
-tapi recall drop drastis dari 1.0 ke 0.333 — miss 2 dari 3 evil PID.
-Penambahan satu tahap compression mengubah pipeline dari recall-safe menjadi recall-unsafe.
+`pipeline_b` menunjukkan perilaku yang tidak konsisten:
 
-Ini implikasi penting untuk desain pipeline SOC: **setiap tahap compression
-harus divalidasi dampaknya terhadap recall secara independen**, tidak bisa
-diasumsikan bahwa menambah tahap selalu aman.
+| Window | Savings | Recall | Status |
+|---|---|---|---|
+| skip=0 | 87.5% | 0.333 | recall-unsafe |
+| skip=5000 | 89.6% | 1.0 | recall-safe |
+| skip=10000 | 92.5% | 1.0 | recall-safe |
+
+Di skip=0, dedup di tahap akhir menyebabkan miss 2 dari 3 evil PID karena
+collision key (eventId, userId). Di window lain, evil PID kebetulan tidak
+collision sehingga recall tetap 1.0.
+
+Implikasi: pipeline_b tidak dapat diandalkan tanpa validasi per window terlebih dahulu.
+**Setiap tahap compression harus divalidasi dampaknya terhadap recall secara independen**,
+tidak bisa diasumsikan bahwa menambah tahap selalu aman atau selalu berbahaya.
 
 ### 4. Exact deduplication rentan collision antar PID
 
@@ -112,10 +145,14 @@ overfit. Paper Highnam et al. (2021) dengan full dataset dapat 0.850.
 ## Pertanyaan Riset yang Muncul
 
 1. **Apakah LLM value-add (+0.167 F1) konsisten di semua window dataset?**
-   Atau hanya kebetulan di 1000 baris pertama ini?
+   Belum divalidasi secara eksplisit, tapi baseline LLM konsisten F1 0.667 di
+   skip=0, skip=5000, dan skip=10000 — sementara rule_sus konsisten F1 0.500.
+   Perlu run yang lebih sistematis untuk klaim yang lebih kuat.
 
-2. **Apakah pipeline_a recall 1.0 konsisten di window dataset yang berbeda?**
-   Perlu divalidasi dengan `--skip 5000`, `--skip 10000`, dll.
+2. **~~Apakah pipeline_a recall 1.0 konsisten di window dataset yang berbeda?~~**
+   **TERJAWAB** — pipeline_a recall 1.0 di semua 3 window yang mengandung evil
+   events (skip=0, skip=5000, skip=10000). Temuan ini sekarang dapat diklaim
+   dengan confidence lebih tinggi.
 
 3. **Bagaimana performa Isolation Forest di full dataset (188k rows)?**
    Apakah ROC-AUC tetap tinggi atau turun mendekati 0.850 seperti paper asli?
@@ -127,14 +164,20 @@ overfit. Paper Highnam et al. (2021) dengan full dataset dapat 0.850.
    Ini akan mempertahankan konteks PID dalam summary alih-alih menghilangkannya.
 
 6. **Apakah pipeline_a tetap recall 1.0 jika evil events tidak selalu berlabel sus=1?**
-   Di BETH, semua evil events kebetulan berlabel sus=1. Di dataset lain atau
-   produksi, asumsi ini mungkin tidak berlaku.
+   Di BETH, semua evil events berlabel sus=1. Di dataset lain atau produksi,
+   asumsi ini mungkin tidak berlaku — ini tetap open question terpenting.
+
+7. **Kenapa pipeline_b tidak konsisten?**
+   Di skip=0, pipeline_b recall 0.333 (miss 2 PID). Di skip=5000 dan skip=10000,
+   recall 1.0. Ini menunjukkan collision antar PID di dedup bersifat
+   window-dependent. Pipeline_b tidak dapat diandalkan tanpa validasi per window.
 
 ---
 
 ## Keterbatasan Eksperimen
 
-- Subset kecil (1000 baris dari 188k) — temuan belum tentu generalisasi
+- Validasi pipeline dilakukan di 3 window (skip=0, 5000, 10000) dari 188k baris total
+- skip=20000 tidak mengandung evil events, tidak bisa dijadikan validasi
 - Hanya satu model LLM (llama-3.3-70b-versatile via Groq)
 - Evil PID di BETH sangat "bersih" — semua event evil berlabel sus=1,
   tidak realistis untuk SOC produksi di mana evil events bisa bercampur
@@ -142,7 +185,7 @@ overfit. Paper Highnam et al. (2021) dengan full dataset dapat 0.850.
 - Whitelist eventId dikalibrasi manual, tidak data-driven
 - ROC-AUC hanya tersedia untuk Isolation Forest, tidak untuk LLM
   (LLM tidak menghasilkan confidence score per event)
-- Rate limit Groq free tier (100k token/hari) membatasi jumlah run
+- Rate limit Groq free tier (100k token/hari) membatasi jumlah run per hari
 
 ---
 
